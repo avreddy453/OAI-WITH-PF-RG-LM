@@ -598,6 +598,9 @@ static void pf_dl(module_id_t module_id,
   int curUE = 0;
   int CC_id = 0;
 
+  /* PFRGLM code */
+  int rnti_selected = 0;
+
   /* Loop UE_info->list to check retransmission */
   UE_iterator(UE_list, UE) {
     if (UE->Msg4_ACKed != true)
@@ -614,9 +617,21 @@ static void pf_dl(module_id_t module_id,
     /* get the PID of a HARQ process awaiting retrnasmission, or -1 otherwise */
     sched_pdsch->dl_harq_pid = sched_ctrl->retrans_dl_harq.head;
     /* Calculate Throughput */
-    const float a = 0.01f;
+
+    /* PFRGLM code */
+    /* const float a = 0.01f; */
+    const float a = 0.0005f;
     const uint32_t b = UE->mac_stats.dl.current_bytes;
     UE->dl_thr_ue = (1 - a) * UE->dl_thr_ue + a * b;
+
+    /* PFRGLM code : begin */
+    /* The additive index bias added to the PF coefficient */
+    static float nu1 = 0.0000f;
+    /* slow scale variation of index bias "the b parameter in theory" */
+    const float ba = 0.0000005f;
+    /* bytes per slot to be guaranteed for 200 Mbps: converted from Mbps : 1400 DL slots in a sec including switching slot for 6-1-3 TDD configuration */
+    const float rg = 19455.0000f;
+    /* PFRGLM code : end */
 
     if (remainUEs == 0)
       continue;
@@ -631,10 +646,12 @@ static void pf_dl(module_id_t module_id,
               UE->rnti,
               frame,
               slot);
+        rnti_selected++; /* PFRGLM code */
         continue;
       }
       /* reduce max_num_ue once we are sure UE can be allocated, i.e., has CCE */
       remainUEs--;
+      rnti_selected++; /* PFRGLM code */
 
     } else {
       /* skip this UE if there are no free HARQ processes. This can happen e.g.
@@ -645,12 +662,15 @@ static void pf_dl(module_id_t module_id,
               UE->rnti,
               frame,
               slot);
+        rnti_selected++; /* PFRGLM code */
         continue;
       }
 
       /* Check DL buffer and skip this UE if no bytes and no TA necessary */
-      if (sched_ctrl->num_total_bytes == 0 && frame != (sched_ctrl->ta_frame + 10) % 1024)
+      if (sched_ctrl->num_total_bytes == 0 && frame != (sched_ctrl->ta_frame + 10) % 1024) {
+        rnti_selected++; /* PFRGLM code */
         continue;
+      }
 
       /* Calculate coeff */
       const NR_bler_options_t *bo = &mac->dl_bler;
@@ -673,7 +693,39 @@ static void pf_dl(module_id_t module_id,
                                     0 /* N_PRB_oh, 0 for initialBWP */,
                                     0 /* tb_scaling */,
                                     sched_pdsch->nrOfLayers) >> 3;
-      float coeff_ue = (float) tbs / UE->dl_thr_ue;
+      /* float coeff_ue = (float) tbs / UE->l_thr_ue; */
+
+      /* PFRGLM code : begin */
+
+      float coeff_ue = (float) tbs;
+
+      /* Best effort UE */
+      if(rnti_selected == 0){
+        coeff_ue *= (1 / UE->dl_thr_ue);
+        LOG_D(NR_MAC, "PFRGLM: UE0 %04x - thr %f \n",UE->rnti,UE->dl_thr_ue);
+      }
+
+      /* Rate guaranteed UE */
+      if(rnti_selected == 1){
+       nu1 = nu1 + ba * (rg - UE->dl_thr_ue);
+
+       if(nu1 < 0.0000){
+         nu1 = 0.0000;
+       }
+
+       if(nu1 >= 10.0000){
+         nu1 = 10.0000;
+       }
+
+       coeff_ue *= ((1 / UE->dl_thr_ue) + nu1);
+       LOG_D(NR_MAC, "PFRGLM: UE1 %04x - thr %f \n",UE->rnti,UE->dl_thr_ue);
+       LOG_D(NR_MAC, "PFRGLM: UE1 %04x - nu1 %f \n",UE->rnti,nu1);
+      }
+
+      rnti_selected++;
+
+      /* PFRGLM code : end */
+
       LOG_D(NR_MAC, "[UE %04x][%4d.%2d] b %d, thr_ue %f, tbs %d, coeff_ue %f\n",
             UE->rnti,
             frame,
